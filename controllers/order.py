@@ -26,10 +26,10 @@ class APIOrderController(http.Controller):
             shipping = data.get('shipping_address', {})
             shipping_same = data.get('shipping_same_as_billing', True)
             cart = data.get('cart', {})
-            Partner = request.env['res.partner'].sudo()
+            Partner = request.env['res.partner']
             country_id = int(billing.get('country_id', 0)) if billing.get('country_id') else False
             if not country_id and billing.get('country_code'):
-                country = request.env['res.country'].sudo().search([('code', '=', billing.get('country_code'))], limit=1)
+                country = request.env['res.country'].search([('code', '=', billing.get('country_code'))], limit=1)
                 country_id = country.id if country else False
             partner_email = billing.get('email')
             partner = Partner.search([('email', '=', partner_email)], limit=1)
@@ -51,7 +51,7 @@ class APIOrderController(http.Controller):
             if not shipping_same and shipping:
                 ship_country_id = int(shipping.get('country_id', 0)) if shipping.get('country_id') else False
                 if not ship_country_id and shipping.get('country_code'):
-                    ship_country = request.env['res.country'].sudo().search([('code', '=', shipping.get('country_code'))], limit=1)
+                    ship_country = request.env['res.country'].search([('code', '=', shipping.get('country_code'))], limit=1)
                     ship_country_id = ship_country.id if ship_country else False
                 shipping_vals = {
                     'name': shipping.get('name'),
@@ -70,7 +70,7 @@ class APIOrderController(http.Controller):
                 product_id = line.get('product_id')
                 qty = line.get('qty', 1.0)
                 price_unit = line.get('price_unit', 0.0)
-                product = request.env['product.product'].sudo().browse(product_id)
+                product = request.env['product.product'].browse(product_id)
                 if not product.exists():
                     return request.make_json_response({
                         'status': 'error',
@@ -84,7 +84,7 @@ class APIOrderController(http.Controller):
                 }))
             amount_shipping = cart.get('amount_shipping', 0.0)
             if amount_shipping > 0:
-                delivery_product = request.env['product.product'].sudo().search([('name', 'ilike', 'Delivery')], limit=1)
+                delivery_product = request.env['product.product'].search([('name', 'ilike', 'Delivery')], limit=1)
                 if delivery_product:
                     order_lines.append((0, 0, {
                         'product_id': delivery_product.id,
