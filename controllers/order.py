@@ -5,6 +5,7 @@ from odoo.http import request
 
 _logger = logging.getLogger(__name__)
 
+
 class APIOrderController(http.Controller):
 
     @http.route('/create/saleorder', type='http', auth='public', methods=['POST'], csrf=False, cors='*')
@@ -17,22 +18,38 @@ class APIOrderController(http.Controller):
                     'status': 'error',
                     'message': 'Invalid JSON payload provided in the request body.'
                 }, status=400)
+
             if not data:
                 return request.make_json_response({
                     'status': 'error',
                     'message': 'No data provided.'
                 }, status=400)
+
             billing = data.get('billing_address', {})
             shipping = data.get('shipping_address', {})
             shipping_same = data.get('shipping_same_as_billing', True)
             cart = data.get('cart', {})
-            Partner = request.env['res.partner']
+
+            partner_email = billing.get('email')
+            if not partner_email:
+                return request.make_json_response({
+                    'status': 'error',
+                    'message': 'Billing email is required.'
+                }, status=400)
+
+            # CRITICAL: Use .sudo() to bypass public user access restrictions safely
+            PartnerEnv = request.env['res.partner'].sudo()
+            CountryEnv = request.env['res.country'].sudo()
+            ProductEnv = request.env['product.product'].sudo()
+            SaleOrderEnv = request.env['sale.order'].sudo()
+
+            # Handle country lookup safely
             country_id = int(billing.get('country_id', 0)) if billing.get('country_id') else False
             if not country_id and billing.get('country_code'):
-                country = request.env['res.country'].search([('code', '=', billing.get('country_code'))], limit=1)
+                country = CountryEnv.search([('code', '=', billing.get('country_code'))], limit=1)
                 country_id = country.id if country else False
-            partner_email = billing.get('email')
-            partner = Partner.search([('email', '=', partner_email)], limit=1)
+
+            partner = PartnerEnv.search([('email', '=', partner_email)], limit=1)
             partner_vals = {
                 'name': billing.get('name'),
                 'email': partner_email,
@@ -44,15 +61,17 @@ class APIOrderController(http.Controller):
             }
 
             if not partner:
-                partner = Partner.create(partner_vals)
+                partner = PartnerEnv.create(partner_vals)
             else:
                 partner.write(partner_vals)
+
             shipping_partner = partner
             if not shipping_same and shipping:
                 ship_country_id = int(shipping.get('country_id', 0)) if shipping.get('country_id') else False
                 if not ship_country_id and shipping.get('country_code'):
-                    ship_country = request.env['res.country'].search([('code', '=', shipping.get('country_code'))], limit=1)
+                    ship_country = CountryEnv.search([('code', '=', shipping.get('country_code'))], limit=1)
                     ship_country_id = ship_country.id if ship_country else False
+
                 shipping_vals = {
                     'name': shipping.get('name'),
                     'email': shipping.get('email'),
@@ -64,13 +83,15 @@ class APIOrderController(http.Controller):
                     'type': 'delivery',
                     'parent_id': partner.id,
                 }
-                shipping_partner = Partner.create(shipping_vals)
+                shipping_partner = PartnerEnv.create(shipping_vals)
+
             order_lines = []
             for line in cart.get('lines', []):
                 product_id = line.get('product_id')
                 qty = line.get('qty', 1.0)
                 price_unit = line.get('price_unit', 0.0)
-                product = request.env['product.product'].browse(product_id)
+
+                product = ProductEnv.browse(product_id)
                 if not product.exists():
                     return request.make_json_response({
                         'status': 'error',
@@ -82,9 +103,10 @@ class APIOrderController(http.Controller):
                     'product_uom_qty': qty,
                     'price_unit': price_unit,
                 }))
+
             amount_shipping = cart.get('amount_shipping', 0.0)
             if amount_shipping > 0:
-                delivery_product = request.env['product.product'].search([('name', 'ilike', 'Delivery')], limit=1)
+                delivery_product = ProductEnv.search([('name', 'ilike', 'Delivery')], limit=1)
                 if delivery_product:
                     order_lines.append((0, 0, {
                         'product_id': delivery_product.id,
@@ -92,14 +114,15 @@ class APIOrderController(http.Controller):
                         'price_unit': amount_shipping,
                         'name': 'Shipping Fees',
                     }))
-            SaleOrder = request.env['sale.order'].sudo()
+
             order_vals = {
                 'partner_id': partner.id,
                 'partner_shipping_id': shipping_partner.id,
                 'client_order_ref': cart.get('name'),
                 'order_line': order_lines,
             }
-            sale_order = SaleOrder.create(order_vals)
+
+            sale_order = SaleOrderEnv.create(order_vals)
             sale_order.action_confirm()
 
             for picking in sale_order.picking_ids.filtered(lambda p: p.state != 'cancel'):
@@ -119,11 +142,10 @@ class APIOrderController(http.Controller):
                     'amount_total': sale_order.amount_total,
                 }
             })
+
         except Exception as e:
             _logger.error("Failed to create sale order from API: %s", str(e))
             return request.make_json_response({
                 'status': 'error',
                 'message': str(e)
             }, status=500)
-
-
