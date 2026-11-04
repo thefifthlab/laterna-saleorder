@@ -24,11 +24,8 @@ class APIInvoicePaymentController(http.Controller):
             journal_code = data.get('journal_code', 'BNK1')
             payment_amount = data.get('amount')
 
-            # Use su=True to instantiate a superuser environment safely
-            Env = request.env(su=True)
-
-            # 1. Locate the Sale Order
-            SaleOrder = Env['sale.order']
+            # 1. Locate the Sale Order using sudo
+            SaleOrder = request.env['sale.order'].sudo()
             sale_order = False
             if order_id:
                 sale_order = SaleOrder.browse(int(order_id))
@@ -47,8 +44,8 @@ class APIInvoicePaymentController(http.Controller):
                     'message': f'Cannot invoice sale order in state "{sale_order.state}". Order must be confirmed first.'
                 }, status=400)
 
-            # 2. Create Invoice from Sale Order
-            invoices = sale_order._create_invoices()
+            # 2. Create Invoice from Sale Order (ensuring sudo context)
+            invoices = sale_order.sudo()._create_invoices()
             if not invoices:
                 return request.make_json_response({
                     'status': 'error',
@@ -59,9 +56,9 @@ class APIInvoicePaymentController(http.Controller):
             payment_results = []
 
             for invoice in invoices:
-                # Post the draft invoice
+                # Post the draft invoice with sudo
                 if invoice.state == 'draft':
-                    invoice.action_post()
+                    invoice.sudo().action_post()
 
                 posted_invoices.append({
                     'invoice_id': invoice.id,
@@ -70,15 +67,15 @@ class APIInvoicePaymentController(http.Controller):
                     'amount_residual': invoice.amount_residual,
                 })
 
-                # 3. Register Payment using Journal Code
+                # 3. Register Payment using Journal Code with sudo
                 if invoice.amount_residual > 0:
-                    journal = Env['account.journal'].search([
+                    journal = request.env['account.journal'].sudo().search([
                         ('code', '=', journal_code),
                         ('company_id', '=', invoice.company_id.id)
                     ], limit=1)
 
                     if not journal.exists():
-                        journal = Env['account.journal'].search([
+                        journal = request.env['account.journal'].sudo().search([
                             ('type', 'in', ('bank', 'cash')),
                             ('company_id', '=', invoice.company_id.id)
                         ], limit=1)
@@ -92,9 +89,9 @@ class APIInvoicePaymentController(http.Controller):
 
                     amount_to_pay = float(payment_amount) if payment_amount else invoice.amount_residual
 
-                    payment_register = Env['account.payment.register'].with_context(
+                    payment_register = request.env['account.payment.register'].sudo().with_context(
                         active_model='account.move',
-                        active_ids=invoice.id
+                        active_ids=invoice.ids
                     ).create({
                         'journal_id': journal.id,
                         'amount': amount_to_pay,
@@ -102,7 +99,7 @@ class APIInvoicePaymentController(http.Controller):
                         'communication': invoice.payment_reference or invoice.name,
                     })
 
-                    payment = payment_register._create_payments()
+                    payment = payment_register.sudo()._create_payments()
 
                     payment_results.append({
                         'payment_id': payment.id,
