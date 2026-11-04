@@ -24,8 +24,8 @@ class APIInvoicePaymentController(http.Controller):
             journal_code = data.get('journal_code', 'BNK1')
             payment_amount = data.get('amount')
 
-            # 1. Locate the Sale Order using superuser
-            SaleOrder = request.env['sale.order'].with_user(1)
+            # 1. Locate the Sale Order using .sudo()
+            SaleOrder = request.env['sale.order'].sudo()
             sale_order = False
             if order_id:
                 sale_order = SaleOrder.browse(int(order_id))
@@ -44,8 +44,8 @@ class APIInvoicePaymentController(http.Controller):
                     'message': f'Cannot invoice sale order in state "{sale_order.state}". Order must be confirmed first.'
                 }, status=400)
 
-            # 2. Create Invoice from Sale Order using superuser
-            invoices = sale_order.with_user(1)._create_invoices()
+            # 2. Create Invoice from Sale Order
+            invoices = sale_order._create_invoices()
             if not invoices:
                 return request.make_json_response({
                     'status': 'error',
@@ -56,9 +56,9 @@ class APIInvoicePaymentController(http.Controller):
             payment_results = []
 
             for invoice in invoices:
-                # Post the draft invoice with superuser
+                # Post the draft invoice with sudo
                 if invoice.state == 'draft':
-                    invoice.with_user(1).action_post()
+                    invoice.sudo().action_post()
 
                 posted_invoices.append({
                     'invoice_id': invoice.id,
@@ -67,15 +67,15 @@ class APIInvoicePaymentController(http.Controller):
                     'amount_residual': invoice.amount_residual,
                 })
 
-                # 3. Register Payment using Journal Code with superuser
+                # 3. Create and Register Payment Directly with sudo
                 if invoice.amount_residual > 0:
-                    journal = request.env['account.journal'].with_user(1).search([
+                    journal = request.env['account.journal'].sudo().search([
                         ('code', '=', journal_code),
                         ('company_id', '=', invoice.company_id.id)
                     ], limit=1)
 
                     if not journal.exists():
-                        journal = request.env['account.journal'].with_user(1).search([
+                        journal = request.env['account.journal'].sudo().search([
                             ('type', 'in', ('bank', 'cash')),
                             ('company_id', '=', invoice.company_id.id)
                         ], limit=1)
@@ -89,17 +89,24 @@ class APIInvoicePaymentController(http.Controller):
 
                     amount_to_pay = float(payment_amount) if payment_amount else invoice.amount_residual
 
-                    payment_register = request.env['account.payment.register'].with_user(1).with_context(
-                        active_model='account.move',
-                        active_ids=invoice.ids
-                    ).create({
-                        'journal_id': journal.id,
+                    payment_vals = {
+                        'payment_type': 'inbound',
+                        'partner_type': 'customer',
+                        'partner_id': invoice.partner_id.id,
                         'amount': amount_to_pay,
-                        'payment_date': fields.Date.context_today(invoice),
-                        'communication': invoice.payment_reference or invoice.name,
-                    })
+                        'journal_id': journal.id,
+                        'date': fields.Date.context_today(invoice),
+                        'memo': invoice.payment_reference or invoice.name,
+                    }
+                    payment = request.env['account.payment'].sudo().create(payment_vals)
+                    payment.action_post()
 
-                    payment = payment_register.with_user(1)._create_payments()
+                    # Reconcile using payment.move_id.line_ids instead of payment.line_ids
+                    lines = (invoice.line_ids + payment.move_id.line_ids).filtered(
+                        lambda line: line.account_id.account_type == 'asset_receivable' and not line.reconciled
+                    )
+                    if lines:
+                        lines.reconcile()
 
                     payment_results.append({
                         'payment_id': payment.id,
@@ -116,7 +123,7 @@ class APIInvoicePaymentController(http.Controller):
                     'order_name': sale_order.name,
                     'invoice_status': sale_order.invoice_status,
                     'invoices': posted_invoices,
-                    'payments': payments if 'payments' in locals() else payment_results,
+                    'payments': payment_results,
                 }
             })
 
